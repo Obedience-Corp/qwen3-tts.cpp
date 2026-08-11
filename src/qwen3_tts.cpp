@@ -5,9 +5,11 @@
 #include <cstring>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <fstream>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -125,16 +127,67 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     transformer_loaded_ = false;
     decoder_loaded_ = false;
     
-    // Construct model paths — prefer quantized (q8_0) over full-precision (f16)
+    // Construct model paths — prefer quantized (q8_0) over full-precision (f16).
+    // Selection order:
+    //   1) QWEN3_TTS_MODEL path override (fail closed if set but missing)
+    //   2) QWEN3_TTS_TIER=0.6b|1.7b when set (fail closed if that tier's GGUF is absent)
+    //   3) Unset tier: prefer 0.6b, then 1.7b among files present in model_dir
     std::string tts_model_path;
-    std::string q8_path = model_dir + "/qwen3-tts-0.6b-q8_0.gguf";
-    std::string f16_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
-    FILE * q8_check = fopen(q8_path.c_str(), "r");
-    if (q8_check) {
-        fclose(q8_check);
-        tts_model_path = q8_path;
+    auto file_exists = [](const std::string & path) -> bool {
+        FILE * f = fopen(path.c_str(), "r");
+        if (!f) return false;
+        fclose(f);
+        return true;
+    };
+    auto first_existing = [&](std::initializer_list<const char *> suffixes) -> std::string {
+        for (const char * suffix : suffixes) {
+            std::string path = model_dir + suffix;
+            if (file_exists(path)) return path;
+        }
+        return {};
+    };
+    const char * env_model = std::getenv("QWEN3_TTS_MODEL");
+    if (env_model && env_model[0] != '\0') {
+        if (!file_exists(env_model)) {
+            error_msg_ = std::string("QWEN3_TTS_MODEL is set but file is missing: ") + env_model;
+            return false;
+        }
+        tts_model_path = env_model;
     } else {
-        tts_model_path = f16_path;
+        std::string tier;
+        if (const char * t = std::getenv("QWEN3_TTS_TIER")) {
+            tier = t;
+            for (char & c : tier) c = (char)tolower((unsigned char)c);
+        }
+        const bool tier_explicit = !tier.empty();
+        if (tier == "1.7" || tier == "1.7b" || tier == "1b7") {
+            tts_model_path = first_existing({
+                "/qwen3-tts-1.7b-q8_0.gguf", "/qwen3-tts-1.7b-f16.gguf",
+            });
+        } else if (tier == "0.6" || tier == "0.6b" || tier == "0b6" || tier == "600m") {
+            tts_model_path = first_existing({
+                "/qwen3-tts-0.6b-q8_0.gguf", "/qwen3-tts-0.6b-f16.gguf",
+            });
+        } else if (tier_explicit) {
+            error_msg_ = "QWEN3_TTS_TIER=" + tier + " is not a known tier (use 0.6b or 1.7b)";
+            return false;
+        }
+        if (tts_model_path.empty() && tier_explicit) {
+            error_msg_ = "requested tier " + tier + " but no matching GGUF under " + model_dir;
+            return false;
+        }
+        // Default / unset tier: discover any available model (0.6b preferred).
+        if (tts_model_path.empty()) {
+            tts_model_path = first_existing({
+                "/qwen3-tts-0.6b-q8_0.gguf", "/qwen3-tts-0.6b-f16.gguf",
+                "/qwen3-tts-1.7b-q8_0.gguf", "/qwen3-tts-1.7b-f16.gguf",
+            });
+        }
+        if (tts_model_path.empty()) {
+            error_msg_ = "no TTS GGUF found under " + model_dir +
+                         " (expected qwen3-tts-0.6b-*.gguf or qwen3-tts-1.7b-*.gguf)";
+            return false;
+        }
     }
     std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
     tts_model_path_ = tts_model_path;
@@ -181,9 +234,14 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
         return false;
     }
     transformer_loaded_ = true;
-    fprintf(stderr, "  TTS transformer loaded: hidden_size=%d, n_layers=%d (%lld ms)\n",
-            transformer_.get_config().hidden_size, transformer_.get_config().n_layers,
-            (long long)(get_time_ms() - t_transformer_start));
+    {
+        const auto & tcfg = transformer_.get_config();
+        fprintf(stderr,
+                "  TTS transformer loaded: talker_hidden=%d code_pred_hidden=%d n_layers=%d model=%s (%lld ms)\n",
+                tcfg.hidden_size, tcfg.code_pred_hidden_size, tcfg.n_layers,
+                tts_model_path.c_str(),
+                (long long)(get_time_ms() - t_transformer_start));
+    }
     log_memory_usage("load/after-transformer");
     
     if (!low_mem_mode_) {

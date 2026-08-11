@@ -33,7 +33,8 @@ typedef struct Qwen3TtsAudio {
 void qwen3_tts_default_params(Qwen3TtsParams* params);
 
 /* Create TTS engine and load models from directory.
- * model_dir must contain qwen3-tts-0.6b-f16.gguf and
+ * model_dir must contain a tier GGUF (qwen3-tts-0.6b-f16.gguf and/or
+ * qwen3-tts-1.7b-f16.gguf; select with QWEN3_TTS_TIER / QWEN3_TTS_MODEL) and
  * qwen3-tts-tokenizer-f16.gguf.
  * Returns NULL on failure. */
 Qwen3Tts* qwen3_tts_create(const char* model_dir, int32_t n_threads);

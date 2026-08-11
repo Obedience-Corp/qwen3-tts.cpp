@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Convert HuggingFace Qwen3-TTS-12Hz-0.6B-Base model to GGUF format.
+Convert HuggingFace Qwen3-TTS-12Hz-{0.6B,1.7B}-Base models to GGUF format.
 
 Usage:
     python scripts/convert_tts_to_gguf.py \
         --input models/Qwen3-TTS-12Hz-0.6B-Base \
         --output models/qwen3-tts-0.6b-f16.gguf \
+        --type f16
+
+    python scripts/convert_tts_to_gguf.py \
+        --input models/Qwen3-TTS-12Hz-1.7B-Base \
+        --output models/qwen3-tts-1.7b-f16.gguf \
         --type f16
 """
 
@@ -39,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class Qwen3TTSConverter:
-    """Converter for Qwen3-TTS-12Hz-0.6B-Base model to GGUF format."""
+    """Converter for Qwen3-TTS-12Hz Base models (0.6B and 1.7B) to GGUF format."""
 
     # Direct tensor name mapping from HuggingFace to GGML conventions
     TENSOR_MAP = {
@@ -55,6 +60,9 @@ class Qwen3TTSConverter:
         "talker.text_projection.linear_fc2.bias": "talker.text_proj.fc2.bias",
         # Code Predictor - Output norm
         "talker.code_predictor.model.norm.weight": "code_pred.output_norm.weight",
+        # Code Predictor - talker→code_pred projection (1.7B; Identity on 0.6B so no weights)
+        "talker.code_predictor.small_to_mtp_projection.weight": "code_pred.small_to_mtp.weight",
+        "talker.code_predictor.small_to_mtp_projection.bias": "code_pred.small_to_mtp.bias",
         # Speaker Encoder - Initial conv
         "speaker_encoder.blocks.0.conv.weight": "spk_enc.conv0.weight",
         "speaker_encoder.blocks.0.conv.bias": "spk_enc.conv0.bias",
@@ -174,9 +182,13 @@ class Qwen3TTSConverter:
         rope_scaling = talker_config.get("rope_scaling", {})
         self.mrope_section = rope_scaling.get("mrope_section", [24, 20, 20])
 
-        # Code Predictor parameters
+        # Code Predictor parameters (often narrower than the talker on 1.7B)
         self.code_predictor_num_layers = code_predictor_config.get("num_hidden_layers", 5)
         self.code_predictor_vocab_size = code_predictor_config.get("vocab_size", 2048)
+        self.code_predictor_hidden_size = code_predictor_config.get("hidden_size", self.hidden_size)
+        self.code_predictor_intermediate_size = code_predictor_config.get(
+            "intermediate_size", self.intermediate_size
+        )
 
         # Speaker Encoder parameters
         self.speaker_enc_dim = speaker_encoder_config.get("enc_dim", 1024)
@@ -187,8 +199,13 @@ class Qwen3TTSConverter:
         self.codec_bos_id = talker_config.get("codec_bos_id", 2149)
         self.codec_eos_id = talker_config.get("codec_eos_token_id", 2150)
 
-        # Model name
-        self.model_name = "Qwen3-TTS-12Hz-0.6B"
+        # Model name from config / path (0.6B or 1.7B)
+        tts_size = str(self.config.get("tts_model_size", "")).lower()
+        if "1b7" in tts_size or "1.7" in tts_size or "1.7" in str(self.input_dir):
+            self.model_name = "Qwen3-TTS-12Hz-1.7B"
+        else:
+            self.model_name = "Qwen3-TTS-12Hz-0.6B"
+        self.needs_mtp = self.code_predictor_hidden_size != self.hidden_size
 
     def _map_tensor_name(self, hf_name: str) -> str | None:
         """Map HuggingFace tensor name to GGML convention."""
@@ -457,9 +474,15 @@ class Qwen3TTSConverter:
         # M-RoPE configuration
         writer.add_array(f"{arch}.rope.mrope_section", self.mrope_section)
 
-        # Code Predictor parameters
+        # Code Predictor parameters (explicit dims required for 1.7B talker/code_pred split)
         writer.add_uint32(f"{arch}.code_predictor.layer_count", self.code_predictor_num_layers)
         writer.add_uint32(f"{arch}.code_predictor.vocab_size", self.code_predictor_vocab_size)
+        writer.add_uint32(f"{arch}.code_pred.layer_count", self.code_predictor_num_layers)
+        writer.add_uint32(f"{arch}.code_pred.vocab_size", self.code_predictor_vocab_size)
+        writer.add_uint32(f"{arch}.code_pred.embedding_length", self.code_predictor_hidden_size)
+        writer.add_uint32(f"{arch}.code_pred.feed_forward_length", self.code_predictor_intermediate_size)
+        writer.add_uint32(f"{arch}.code_predictor.embedding_length", self.code_predictor_hidden_size)
+        writer.add_uint32(f"{arch}.code_predictor.feed_forward_length", self.code_predictor_intermediate_size)
 
         # Speaker Encoder parameters
         writer.add_uint32(f"{arch}.speaker_encoder.embedding_length", self.speaker_enc_dim)
@@ -526,7 +549,7 @@ class Qwen3TTSConverter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert Qwen3-TTS-12Hz-0.6B-Base model to GGUF format"
+        description="Convert Qwen3-TTS-12Hz Base (0.6B or 1.7B) model to GGUF format"
     )
     parser.add_argument(
         "--input", "-i",

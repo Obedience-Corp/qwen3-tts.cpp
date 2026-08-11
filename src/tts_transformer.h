@@ -77,9 +77,14 @@ struct tts_transformer_config {
     int32_t codec_vocab_size = 3072;  // talker.codec_embd/codec_head
     int32_t n_codebooks = 16;
     
-    // Code predictor
+    // Code predictor (may be narrower than the talker on 1.7B).
+    // On 0.6B, code_pred_hidden_size == hidden_size (1024). On 1.7B the talker
+    // is 2048-d while the code predictor stays 1024-d; inputs are projected via
+    // small_to_mtp (talker → code_pred) before the code-pred transformer.
     int32_t code_pred_layers = 5;
     int32_t code_pred_vocab_size = 2048;  // Per-codebook vocab
+    int32_t code_pred_hidden_size = 1024;
+    int32_t code_pred_intermediate_size = 3072;
     
     // Special codec tokens
     int32_t codec_pad_id = 2148;
@@ -143,11 +148,17 @@ struct tts_transformer_model {
      std::vector<transformer_layer> code_pred_layers;
      
      // Code predictor output norm (final RMS norm before lm_head)
-     struct ggml_tensor * code_pred_output_norm = nullptr;  // [hidden_size]
+     struct ggml_tensor * code_pred_output_norm = nullptr;  // [code_pred_hidden_size]
      
-     // Code predictor per-codebook embeddings and heads (15 codebooks, 0 uses talker output)
+     // Talker→code-pred projection (1.7B). Absent on 0.6B when sizes match.
+     // Weight layout: ne[0]=talker hidden, ne[1]=code_pred hidden.
+     struct ggml_tensor * code_pred_mtp_w = nullptr;
+     struct ggml_tensor * code_pred_mtp_b = nullptr;
+
+     // Code predictor per-codebook embeddings and heads (15 codebooks, 0 uses talker output).
+     // Embeddings are talker-sized; heads are code_pred-sized.
      std::vector<struct ggml_tensor *> code_pred_embd;  // [hidden_size, code_pred_vocab_size] x 15
-     std::vector<struct ggml_tensor *> code_pred_head;  // [hidden_size, code_pred_vocab_size] x 15
+     std::vector<struct ggml_tensor *> code_pred_head;  // [code_pred_hidden_size, code_pred_vocab_size] x 15
     
     // GGML context for tensor metadata
     struct ggml_context * ctx = nullptr;
