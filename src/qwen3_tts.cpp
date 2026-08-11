@@ -129,9 +129,9 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     
     // Construct model paths — prefer quantized (q8_0) over full-precision (f16).
     // Selection order:
-    //   1) QWEN3_TTS_MODEL absolute/relative path override
-    //   2) QWEN3_TTS_TIER=0.6b|1.7b (default 0.6b) among files present in model_dir
-    //   3) Any available tier (0.6b first, then 1.7b)
+    //   1) QWEN3_TTS_MODEL path override (fail closed if set but missing)
+    //   2) QWEN3_TTS_TIER=0.6b|1.7b when set (fail closed if that tier's GGUF is absent)
+    //   3) Unset tier: prefer 0.6b, then 1.7b among files present in model_dir
     std::string tts_model_path;
     auto file_exists = [](const std::string & path) -> bool {
         FILE * f = fopen(path.c_str(), "r");
@@ -147,7 +147,11 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
         return {};
     };
     const char * env_model = std::getenv("QWEN3_TTS_MODEL");
-    if (env_model && env_model[0] != '\0' && file_exists(env_model)) {
+    if (env_model && env_model[0] != '\0') {
+        if (!file_exists(env_model)) {
+            error_msg_ = std::string("QWEN3_TTS_MODEL is set but file is missing: ") + env_model;
+            return false;
+        }
         tts_model_path = env_model;
     } else {
         std::string tier;
@@ -155,6 +159,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
             tier = t;
             for (char & c : tier) c = (char)tolower((unsigned char)c);
         }
+        const bool tier_explicit = !tier.empty();
         if (tier == "1.7" || tier == "1.7b" || tier == "1b7") {
             tts_model_path = first_existing({
                 "/qwen3-tts-1.7b-q8_0.gguf", "/qwen3-tts-1.7b-f16.gguf",
@@ -163,7 +168,15 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
             tts_model_path = first_existing({
                 "/qwen3-tts-0.6b-q8_0.gguf", "/qwen3-tts-0.6b-f16.gguf",
             });
+        } else if (tier_explicit) {
+            error_msg_ = "QWEN3_TTS_TIER=" + tier + " is not a known tier (use 0.6b or 1.7b)";
+            return false;
         }
+        if (tts_model_path.empty() && tier_explicit) {
+            error_msg_ = "requested tier " + tier + " but no matching GGUF under " + model_dir;
+            return false;
+        }
+        // Default / unset tier: discover any available model (0.6b preferred).
         if (tts_model_path.empty()) {
             tts_model_path = first_existing({
                 "/qwen3-tts-0.6b-q8_0.gguf", "/qwen3-tts-0.6b-f16.gguf",
@@ -171,7 +184,9 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
             });
         }
         if (tts_model_path.empty()) {
-            tts_model_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
+            error_msg_ = "no TTS GGUF found under " + model_dir +
+                         " (expected qwen3-tts-0.6b-*.gguf or qwen3-tts-1.7b-*.gguf)";
+            return false;
         }
     }
     std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
