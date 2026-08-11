@@ -32,13 +32,32 @@ from typing import Iterable, Optional
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
-BASE_REPO_IDS = [
+BASE_REPO_IDS_06B = [
     "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
     "Qwen/Qwen3-TTS-0.6B-Base",
 ]
+BASE_REPO_IDS_17B = [
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "Qwen/Qwen3-TTS-1.7B-Base",
+]
+# Back-compat alias used by ensure_base_assets default path.
+BASE_REPO_IDS = BASE_REPO_IDS_06B
 TOKENIZER_REPO_IDS = [
     "Qwen/Qwen3-TTS-Tokenizer-12Hz",
 ]
+
+TIER_SPECS = {
+    "0.6b": {
+        "repo_ids": BASE_REPO_IDS_06B,
+        "base_dirname": "Qwen3-TTS-12Hz-0.6B-Base",
+        "out_tts": "qwen3-tts-0.6b-f16.gguf",
+    },
+    "1.7b": {
+        "repo_ids": BASE_REPO_IDS_17B,
+        "base_dirname": "Qwen3-TTS-12Hz-1.7B-Base",
+        "out_tts": "qwen3-tts-1.7b-f16.gguf",
+    },
+}
 
 
 def eprint(msg: str) -> None:
@@ -96,7 +115,12 @@ def snapshot_download_repo(
     raise RuntimeError("No model repositories configured")
 
 
-def ensure_base_assets(base_dir: Path, token: Optional[str], force_download: bool) -> None:
+def ensure_base_assets(
+    base_dir: Path,
+    token: Optional[str],
+    force_download: bool,
+    repo_ids: Optional[list[str]] = None,
+) -> None:
     required = [
         base_dir / "config.json",
         base_dir / "model.safetensors",
@@ -123,7 +147,7 @@ def ensure_base_assets(base_dir: Path, token: Optional[str], force_download: boo
         "preprocessor_config.json",
         "speech_tokenizer/*",
     ]
-    snapshot_download_repo(BASE_REPO_IDS, base_dir, token, allow_patterns)
+    snapshot_download_repo(repo_ids or BASE_REPO_IDS, base_dir, token, allow_patterns)
 
 
 def ensure_tokenizer_assets(
@@ -256,13 +280,19 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Download and prepare all runtime models for qwen3-tts.cpp")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Target models directory")
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""), help="Hugging Face token (or set HF_TOKEN)")
+    p.add_argument(
+        "--tier",
+        default=os.environ.get("QWEN3_TTS_TIER", "0.6b"),
+        choices=sorted(TIER_SPECS.keys()),
+        help="Model tier to download/convert (default 0.6b; 1.7b is larger)",
+    )
     p.add_argument("--skip-download", action="store_true", help="Skip model downloads")
     p.add_argument("--skip-gguf", action="store_true", help="Skip GGUF conversion")
     p.add_argument(
         "--coreml",
         choices=["auto", "on", "off"],
         default="auto",
-        help="CoreML export mode: auto=macOS only, on=force, off=disable",
+        help="CoreML export mode: auto=macOS only, on=force, off=disable (0.6B only)",
     )
     p.add_argument("--force", action="store_true", help="Re-download/re-generate outputs")
     return p.parse_args()
@@ -270,11 +300,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    tier = args.tier.lower()
+    spec = TIER_SPECS[tier]
 
     models_dir = Path(args.models_dir).resolve()
-    base_dir = models_dir / "Qwen3-TTS-12Hz-0.6B-Base"
+    base_dir = models_dir / spec["base_dirname"]
     tokenizer_dir = models_dir / "Qwen3-TTS-Tokenizer-12Hz"
-    out_tts = models_dir / "qwen3-tts-0.6b-f16.gguf"
+    out_tts = models_dir / spec["out_tts"]
     out_tok = models_dir / "qwen3-tts-tokenizer-f16.gguf"
     out_coreml = models_dir / "coreml" / "code_predictor.mlpackage"
 
@@ -284,7 +316,7 @@ def main() -> int:
 
     if not args.skip_download:
         require_modules([("huggingface_hub", "huggingface_hub")])
-        ensure_base_assets(base_dir, hf_token, args.force)
+        ensure_base_assets(base_dir, hf_token, args.force, repo_ids=list(spec["repo_ids"]))
         tokenizer_input_dir = ensure_tokenizer_assets(base_dir, tokenizer_dir, hf_token, args.force)
     else:
         tokenizer_input_dir = base_dir if (base_dir / "speech_tokenizer" / "model.safetensors").exists() else tokenizer_dir
@@ -292,24 +324,28 @@ def main() -> int:
     if not args.skip_gguf:
         convert_gguf(sys.executable, base_dir, tokenizer_input_dir, out_tts, out_tok, args.force)
 
-    wants_coreml = args.coreml == "on" or (args.coreml == "auto" and platform.system() == "Darwin")
+    # CoreML code predictor is 0.6B-shaped; skip for 1.7B.
+    wants_coreml = (
+        tier == "0.6b"
+        and (args.coreml == "on" or (args.coreml == "auto" and platform.system() == "Darwin"))
+    )
     if wants_coreml:
         if platform.system() != "Darwin":
             raise RuntimeError("CoreML export requested on non-macOS platform")
         export_coreml(sys.executable, base_dir, out_coreml, args.force)
 
-    eprint("\n[done] Model setup complete.")
+    eprint(f"\n[done] Model setup complete (tier={tier}).")
     eprint(f"  - {out_tts}")
     eprint(f"  - {out_tok}")
     if wants_coreml:
         eprint(f"  - {out_coreml}")
-        eprint("\nRun (CoreML is enabled by default on macOS):")
+        eprint("\nRun (CoreML is enabled by default on macOS for 0.6B):")
         eprint("  ./build/qwen3-tts-cli -m models -t \"Hello\" -o out.wav")
         eprint("  # Optional override path:")
         eprint("  QWEN3_TTS_COREML_MODEL=models/coreml/code_predictor.mlpackage ./build/qwen3-tts-cli -m models -t \"Hello\" -o out.wav")
     else:
-        eprint("\nRun without CoreML:")
-        eprint("  ./build/qwen3-tts-cli -m models -t \"Hello\" -o out.wav")
+        eprint("\nRun:")
+        eprint(f"  QWEN3_TTS_TIER={tier} ./build/qwen3-tts-cli -m models -t \"Hello\" -o out.wav")
 
     return 0
 
