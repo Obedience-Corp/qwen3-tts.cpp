@@ -126,6 +126,12 @@ public:
                                           const float * embedding, int32_t embedding_size,
                                           const tts_params & params = tts_params());
 
+    // Number of floats a speaker embedding must have for the loaded model
+    // (talker hidden_size: 1024 on 0.6B, 2048 on 1.7B). 0 before load.
+    int32_t speaker_embedding_size() const {
+        return models_loaded_ ? transformer_.get_config().hidden_size : 0;
+    }
+
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
     

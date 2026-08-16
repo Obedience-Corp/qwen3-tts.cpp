@@ -224,6 +224,11 @@ int32_t qwen3_tts_extract_embedding_file(
     return emb_size;
 }
 
+int32_t qwen3_tts_speaker_embedding_size(const Qwen3Tts * tts) {
+    if (!tts) return 0;
+    return tts->engine.speaker_embedding_size();
+}
+
 Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
         Qwen3Tts * tts, const char * text,
         const float * embedding, int32_t embedding_size,

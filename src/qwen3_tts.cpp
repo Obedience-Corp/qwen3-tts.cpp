@@ -401,6 +401,19 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
         return result;
     }
 
+    // The transformer consumes exactly hidden_size floats of conditioning
+    // (memcpy in build_prefill_graph). A smaller buffer — e.g. a preset baked
+    // with another tier's speaker encoder (0.6b=1024, 1.7b=2048) — would be
+    // read past its end: undefined behavior that surfaces as a different
+    // corrupted voice on every synthesis. Fail loud instead.
+    const int32_t want = transformer_.get_config().hidden_size;
+    if (embedding_size != want) {
+        result.error_msg = "Speaker embedding is " + std::to_string(embedding_size) +
+                           " floats but this model expects " + std::to_string(want) +
+                           " (preset baked for a different model tier?)";
+        return result;
+    }
+
     return synthesize_internal(text, embedding, params, result);
 }
 

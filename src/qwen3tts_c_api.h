@@ -87,9 +87,13 @@ int32_t qwen3_tts_extract_embedding_file(
     float* embedding_out,
     int32_t max_size);
 
+/* Number of floats a speaker embedding must have for the loaded model
+ * (talker hidden_size: 1024 on 0.6B, 2048 on 1.7B). 0 before load. */
+int32_t qwen3_tts_speaker_embedding_size(const Qwen3Tts* tts);
+
 /* Synthesize with pre-computed speaker embedding (skips encoder).
  * embedding: speaker embedding from qwen3_tts_extract_embedding_file().
- * embedding_size: must match the size returned by extract.
+ * embedding_size: must match qwen3_tts_speaker_embedding_size().
  * Returns NULL on failure. Caller must free with qwen3_tts_free_audio(). */
 Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
     Qwen3Tts* tts,
