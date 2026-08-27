@@ -2655,7 +2655,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t language_id,
                                float repetition_penalty,
                                float temperature,
-                               int32_t top_k) {
+                               int32_t top_k,
+                               const frame_callback_t & on_frame) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -2821,6 +2822,14 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
         
         for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
             output.push_back(frame_codes[cb]);
+        }
+
+        if (on_frame && !on_frame(frame_codes.data(), cfg.n_codebooks)) {
+            error_msg_ = "Generation aborted by frame callback";
+#ifdef QWEN3_TTS_TIMING
+            timing_ = nullptr;
+#endif
+            return false;
         }
 
 #ifdef QWEN3_TTS_TIMING

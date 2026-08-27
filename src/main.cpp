@@ -1,5 +1,6 @@
 #include "qwen3_tts.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -19,6 +20,8 @@ void print_usage(const char * program) {
     fprintf(stderr, "  --repetition-penalty <val> Repetition penalty (default: 1.05)\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
+    fprintf(stderr, "  --stream               Stream PCM during synthesis; report time-to-first-audio\n");
+    fprintf(stderr, "  --stream-chunk-frames <n> Codec frames per streamed chunk (default: 12, ~0.96 s)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Environment:\n");
@@ -26,6 +29,8 @@ void print_usage(const char * program) {
     fprintf(stderr, "  QWEN3_TTS_DEVICE       CUDA device index when backend=cuda (default: 0)\n");
     fprintf(stderr, "  QWEN3_TTS_DECODER_GPU_MAX_FRAMES     Max frames per CUDA vocoder chunk (default: 34)\n");
     fprintf(stderr, "  QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES Left context per CUDA vocoder chunk (default: 12)\n");
+    fprintf(stderr, "  QWEN3_TTS_DECODER_CHUNKED            Force chunked vocoder decode on any backend (set to 1)\n");
+    fprintf(stderr, "  QWEN3_TTS_STREAM_CHUNK_FRAMES        Frames per streamed PCM chunk (default: 12)\n");
     fprintf(stderr, "  QWEN3_TTS_LOW_MEM      Enable low-memory mode (set to 1)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Example:\n");
@@ -38,7 +43,9 @@ int main(int argc, char ** argv) {
     std::string text;
     std::string output_file = "output.wav";
     std::string reference_audio;
-    
+    bool stream = false;
+    int stream_chunk_frames = 0;
+
     qwen3_tts::tts_params params;
     
     // Parse arguments
@@ -122,6 +129,15 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "Error: unknown language '%s'. Supported: en,ru,zh,ja,ko,de,fr,es,it,pt\n", lang.c_str());
                 return 1;
             }
+        } else if (arg == "--stream") {
+            stream = true;
+        } else if (arg == "--stream-chunk-frames") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing stream-chunk-frames value\n");
+                return 1;
+            }
+            stream_chunk_frames = std::stoi(argv[i]);
+            stream = true;
         } else if (arg == "-j" || arg == "--threads") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing threads value\n");
@@ -162,9 +178,35 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\rGenerating: %d/%d tokens", tokens, max_tokens);
     });
     
+    // Stream PCM chunks: record time-to-first-audio and chunk cadence.
+    using clock = std::chrono::steady_clock;
+    clock::time_point t_synth_start;
+    double ttfa_ms = -1.0;
+    int n_chunks = 0;
+    int64_t n_streamed_samples = 0;
+    if (stream) {
+        tts.set_pcm_callback(
+            [&](const float *, int32_t n_samples, int32_t sample_rate) {
+                const double elapsed_ms =
+                    std::chrono::duration<double, std::milli>(clock::now() - t_synth_start).count();
+                if (ttfa_ms < 0.0) {
+                    ttfa_ms = elapsed_ms;
+                }
+                n_chunks++;
+                n_streamed_samples += n_samples;
+                fprintf(stderr, "  [stream] chunk %d: %d samples (%.2f s audio) at %.1f ms\n",
+                        n_chunks, n_samples,
+                        sample_rate > 0 ? (double)n_streamed_samples / sample_rate : 0.0,
+                        elapsed_ms);
+                return true;
+            },
+            stream_chunk_frames);
+    }
+
     // Generate speech
     qwen3_tts::tts_result result;
-    
+    t_synth_start = clock::now();
+
     if (reference_audio.empty()) {
         fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
         result = tts.synthesize(text, params);
@@ -201,6 +243,17 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
         fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
     }
-    
+
+    if (stream) {
+        const double audio_sec = result.sample_rate > 0
+            ? (double)result.audio.size() / result.sample_rate : 0.0;
+        fprintf(stderr, "\nStreaming:\n");
+        fprintf(stderr, "  Chunks:    %6d\n", n_chunks);
+        fprintf(stderr, "  TTFA:      %6.1f ms\n", ttfa_ms);
+        fprintf(stderr, "  Full wall: %6lld ms\n", (long long)result.t_total_ms);
+        fprintf(stderr, "  RTF:       %6.3f\n",
+                audio_sec > 0.0 ? (double)result.t_total_ms / 1000.0 / audio_sec : 0.0);
+    }
+
     return 0;
 }

@@ -78,6 +78,12 @@ struct tts_result {
 // Progress callback type
 using tts_progress_callback_t = std::function<void(int tokens_generated, int max_tokens)>;
 
+// PCM streaming callback: invoked with one decoded chunk while synthesis is still
+// running. samples are mono float32 at sample_rate, valid for the duration of the
+// call. Return false to abort synthesis.
+using tts_pcm_callback_t = std::function<bool(const float * samples, int32_t n_samples,
+                                              int32_t sample_rate)>;
+
 // Main TTS class that orchestrates the full pipeline
 class Qwen3TTS {
 public:
@@ -134,7 +140,21 @@ public:
 
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
-    
+
+    // Enable PCM streaming for subsequent synthesize* calls: generation and
+    // vocoder decode interleave on the calling thread, and `callback` receives
+    // each decoded chunk as soon as its codes exist. The synthesize* call still
+    // returns the complete audio, so non-streaming callers are unaffected.
+    // chunk_frames <= 0 uses the QWEN3_TTS_STREAM_CHUNK_FRAMES default (12
+    // frames ≈ 0.96 s of audio); context_frames < 0 uses the decoder default.
+    // Pass a null callback to go back to whole-utterance synthesis (the default).
+    void set_pcm_callback(tts_pcm_callback_t callback,
+                          int32_t chunk_frames = 0,
+                          int32_t context_frames = -1);
+
+    // True while a PCM streaming callback is installed.
+    bool is_streaming() const { return (bool) pcm_callback_; }
+
     // Get error message
     const std::string & get_error() const { return error_msg_; }
     
@@ -146,7 +166,12 @@ private:
                                    const float * speaker_embedding,
                                    const tts_params & params,
                                    tts_result & result);
-    
+
+    // Frames per streamed chunk / left context frames, after applying the
+    // set_pcm_callback() arguments and the environment defaults.
+    int32_t stream_chunk_frames() const;
+    int32_t stream_context_frames() const;
+
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
     AudioTokenizerEncoder audio_encoder_;
@@ -161,6 +186,9 @@ private:
     std::string tts_model_path_;
     std::string decoder_model_path_;
     tts_progress_callback_t progress_callback_;
+    tts_pcm_callback_t pcm_callback_;
+    int32_t pcm_chunk_frames_ = 0;
+    int32_t pcm_context_frames_ = -1;
 };
 
 // Utility: Load audio file (WAV format)

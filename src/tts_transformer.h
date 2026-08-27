@@ -10,11 +10,17 @@
 #include <vector>
 #include <memory>
 #include <random>
+#include <functional>
 #ifdef QWEN3_TTS_TIMING
 #include <chrono>
 #endif
 
 namespace qwen3_tts {
+
+// Invoked by generate() once per completed frame, before the next talker step.
+// frame_codes points at n_codebooks codes for that frame (valid for the call only).
+// Return false to abort generation (generate() then fails with an error).
+using frame_callback_t = std::function<bool(const int32_t * frame_codes, int32_t n_codebooks)>;
 
 #ifdef QWEN3_TTS_TIMING
 struct tts_timing {
@@ -269,13 +275,17 @@ public:
     // speaker_embd: speaker embedding [hidden_size]
     // max_len: maximum number of frames to generate
     // output: generated speech codes [n_frames, n_codebooks]
+    // on_frame: optional per-frame hook (see frame_callback_t). Codes are appended
+    //           to output either way; the hook only lets a caller act on a frame
+    //           before the next one is generated.
     bool generate(const int32_t * text_tokens, int32_t n_tokens,
                   const float * speaker_embd, int32_t max_len,
                   std::vector<int32_t> & output,
                   int32_t language_id = 2050,
                   float repetition_penalty = 1.05f,
                   float temperature = 0.9f,
-                  int32_t top_k = 50);
+                  int32_t top_k = 50,
+                  const frame_callback_t & on_frame = nullptr);
     
     const tts_transformer_config & get_config() const { return model_.config; }
     

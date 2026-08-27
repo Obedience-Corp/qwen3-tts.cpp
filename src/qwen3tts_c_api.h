@@ -8,6 +8,11 @@
 extern "C" {
 #endif
 
+/* Feature macro: this header exposes qwen3_tts_set_pcm_callback(). Hosts that
+ * build against a pinned engine can #ifdef on it to stay compatible with pins
+ * that predate PCM streaming. */
+#define QWEN3_TTS_HAS_PCM_STREAMING 1
+
 /* Opaque handle */
 typedef struct Qwen3Tts Qwen3Tts;
 
@@ -101,6 +106,35 @@ Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
     const float* embedding,
     int32_t embedding_size,
     const Qwen3TtsParams* params);
+
+/* PCM streaming callback. Invoked with one decoded chunk while synthesis is
+ * still running, on the thread that called qwen3_tts_synthesize*.
+ * samples: mono float32 at sample_rate, valid for the duration of the call only.
+ * Return 0 to abort synthesis (the synthesize call then returns NULL). */
+typedef int (*Qwen3TtsPcmCallback)(
+    const float* samples,
+    int32_t n_samples,
+    int32_t sample_rate,
+    void* user_data);
+
+/* Enable PCM streaming for subsequent qwen3_tts_synthesize* calls: code
+ * generation and vocoder decode interleave on the calling thread, and cb is
+ * invoked as soon as each chunk's codes exist. The synthesize call still
+ * returns the complete audio, so callers that ignore the callback see no
+ * behaviour change.
+ *
+ * cb = NULL restores whole-utterance synthesis, which is the default.
+ * chunk_frames <= 0 uses the engine default (QWEN3_TTS_STREAM_CHUNK_FRAMES,
+ * 12 codec frames ~= 0.96 s of audio).
+ *
+ * The streamed chunks concatenate to the same waveform the whole-utterance path
+ * produces for the same chunk schedule; they are not sample-identical to a
+ * single-graph decode of the whole utterance, which has unbounded left context. */
+void qwen3_tts_set_pcm_callback(
+    Qwen3Tts* tts,
+    Qwen3TtsPcmCallback cb,
+    void* user_data,
+    int32_t chunk_frames);
 
 /* Get last error message (or empty string) */
 const char* qwen3_tts_get_error(const Qwen3Tts* tts);
