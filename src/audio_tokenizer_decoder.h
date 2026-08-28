@@ -173,7 +173,20 @@ public:
     // Returns: audio samples normalized to [-1, 1] at 24kHz
     bool decode(const int32_t * codes, int32_t n_frames,
                 std::vector<float> & samples);
-    
+
+    // Decode frames [start, end) using up to context_frames preceding frames as
+    // left context, dropping the warm-up samples those context frames produce.
+    // Needs no frames past `end`, so a caller generating codes incrementally can
+    // decode a prefix while the rest is still being generated. Calling this over
+    // consecutive ranges yields exactly the samples decode_chunked() produces for
+    // the same (chunk, context) schedule — it is the same call, same order.
+    // codes: full code buffer [>= end frames, n_codebooks]
+    bool decode_range(const int32_t * codes, int32_t start, int32_t end,
+                      int32_t context_frames, std::vector<float> & samples);
+
+    // Default left context for chunked/streaming decode (env-overridable).
+    static int32_t default_context_frames();
+
     const audio_decoder_config & get_config() const { return model_.config; }
     
     const std::string & get_error() const { return error_msg_; }
@@ -184,9 +197,9 @@ private:
     bool decode_single(const int32_t * codes, int32_t n_frames, int32_t position_offset,
                        std::vector<float> & samples);
     bool is_primary_backend_cuda() const;
-    bool decode_chunked_cuda(const int32_t * codes, int32_t n_frames,
-                             std::vector<float> & samples,
-                             int32_t max_gpu_frames, int32_t context_frames_cfg);
+    bool decode_chunked(const int32_t * codes, int32_t n_frames,
+                        std::vector<float> & samples,
+                        int32_t max_gpu_frames, int32_t context_frames_cfg);
     int64_t output_samples_for_frames(int32_t n_frames) const;
     
     // Apply Snake activation: x + (1/alpha) * sin^2(alpha * x)

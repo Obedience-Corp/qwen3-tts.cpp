@@ -46,6 +46,9 @@ struct Qwen3TtsAudio {
     int32_t sample_rate;
 };
 
+typedef int (*Qwen3TtsPcmCallback)(const float * samples, int32_t n_samples,
+                                   int32_t sample_rate, void * user_data);
+
 // Opaque handle — backs the C typedef
 struct Qwen3Tts {
     qwen3_tts::Qwen3TTS engine;
@@ -224,6 +227,11 @@ int32_t qwen3_tts_extract_embedding_file(
     return emb_size;
 }
 
+int32_t qwen3_tts_speaker_embedding_size(const Qwen3Tts * tts) {
+    if (!tts) return 0;
+    return tts->engine.speaker_embedding_size();
+}
+
 Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
         Qwen3Tts * tts, const char * text,
         const float * embedding, int32_t embedding_size,
@@ -238,6 +246,20 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
     auto * out = to_c_audio(result);
     AUTORELEASE_END
     return out;
+}
+
+void qwen3_tts_set_pcm_callback(Qwen3Tts * tts, Qwen3TtsPcmCallback cb,
+                                void * user_data, int32_t chunk_frames) {
+    if (!tts) return;
+    if (!cb) {
+        tts->engine.set_pcm_callback(nullptr);
+        return;
+    }
+    tts->engine.set_pcm_callback(
+        [cb, user_data](const float * samples, int32_t n_samples, int32_t sample_rate) {
+            return cb(samples, n_samples, sample_rate, user_data) != 0;
+        },
+        chunk_frames);
 }
 
 const char * qwen3_tts_get_error(const Qwen3Tts * tts) {

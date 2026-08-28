@@ -181,6 +181,8 @@ Place both `.gguf` files in a `models/` directory.
 | `--max-tokens <n>` | Maximum audio frames to generate | 4096 |
 | `--repetition-penalty <val>` | Repetition penalty on codebook-0 token generation | 1.05 |
 | `-j, --threads <n>` | Number of compute threads | 4 |
+| `--stream` | Stream PCM during synthesis and report time-to-first-audio | off |
+| `--stream-chunk-frames <n>` | Codec frames per streamed chunk (~80 ms of audio each) | 12 |
 
 `--top-p` is currently parsed by the CLI but not yet wired into transformer sampling.
 
@@ -198,6 +200,46 @@ At runtime, each component logs its selected backend (for example, `TTSTransform
 - `QWEN3_TTS_DEVICE` selects CUDA device index when `QWEN3_TTS_BACKEND=cuda` (default device is index 0)
 - `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` controls max frames per CUDA vocoder chunk (default: `34`)
 - `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` controls left-context frames per CUDA vocoder chunk (default: `12`)
+- `QWEN3_TTS_DECODER_CHUNKED=1` forces chunked vocoder decode on any backend (default: CUDA only)
+
+## PCM Streaming (opt-in)
+
+By default a synthesize call generates every speech code, decodes the whole
+waveform, and returns one buffer. With a PCM callback installed, code generation
+and vocoder decode interleave on the calling thread: as soon as a chunk's codes
+exist they are decoded and handed to the callback, so audio starts flowing long
+before the utterance ends. The synthesize call still returns the complete audio,
+so callers that ignore the callback see no change.
+
+C++:
+
+```cpp
+qwen3_tts::Qwen3TTS tts;
+tts.load_models(model_dir);
+tts.set_pcm_callback([](const float * pcm, int32_t n, int32_t rate) {
+    play(pcm, n, rate);   // return false to abort synthesis
+    return true;
+});
+auto result = tts.synthesize(text, params);   // result.audio still holds it all
+```
+
+C ABI (`qwen3tts_c_api.h`, guarded by `QWEN3_TTS_HAS_PCM_STREAMING`):
+
+```c
+qwen3_tts_set_pcm_callback(tts, on_pcm, user_data, /*chunk_frames=*/0);
+```
+
+Notes:
+
+- One chunk is `--stream-chunk-frames` codec frames (default 12, about 0.96 s of
+  audio at 12.5 Hz); `QWEN3_TTS_STREAM_CHUNK_FRAMES` sets the default.
+- No threads are created. The callback runs on the thread that called
+  synthesize, between talker steps, so the one-request-at-a-time contract holds.
+- Each chunk is decoded with `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` frames of
+  left context and no right context — the same scheme the CUDA chunked decoder
+  already uses. Streamed audio is therefore byte-identical to a whole-utterance
+  decode with the same chunk schedule, but not to a single-graph decode of the
+  whole utterance, which has unbounded left context.
 
 ## Architecture
 

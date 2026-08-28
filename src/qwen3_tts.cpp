@@ -1,6 +1,7 @@
 #include "qwen3_tts.h"
 #include "gguf_loader.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -401,6 +402,19 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
         return result;
     }
 
+    // The transformer consumes exactly hidden_size floats of conditioning
+    // (memcpy in build_prefill_graph). A smaller buffer — e.g. a preset baked
+    // with another tier's speaker encoder (0.6b=1024, 1.7b=2048) — would be
+    // read past its end: undefined behavior that surfaces as a different
+    // corrupted voice on every synthesis. Fail loud instead.
+    const int32_t want = transformer_.get_config().hidden_size;
+    if (embedding_size != want) {
+        result.error_msg = "Speaker embedding is " + std::to_string(embedding_size) +
+                           " floats but this model expects " + std::to_string(want) +
+                           " (preset baked for a different model tier?)";
+        return result;
+    }
+
     return synthesize_internal(text, embedding, params, result);
 }
 
@@ -472,21 +486,98 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         }
     }
     transformer_.clear_kv_cache();
-    
+
+    auto ensure_decoder_loaded = [&]() -> bool {
+        if (decoder_loaded_) {
+            return true;
+        }
+        int64_t t_decoder_load_start = get_time_ms();
+        if (decoder_model_path_.empty()) {
+            result.error_msg = "Internal error: missing vocoder model path";
+            return false;
+        }
+        if (!audio_decoder_.load_model(decoder_model_path_)) {
+            result.error_msg = "Failed to load vocoder: " + audio_decoder_.get_error();
+            return false;
+        }
+        decoder_loaded_ = true;
+        if (params.print_timing) {
+            fprintf(stderr, "  Vocoder lazy-loaded in %lld ms\n",
+                    (long long)(get_time_ms() - t_decoder_load_start));
+            sample_memory("synth/after-vocoder-load");
+        }
+        return true;
+    };
+
+    const int n_codebooks = transformer_.get_config().n_codebooks;
+    const bool streaming = (bool) pcm_callback_;
+
+    // Streaming state: generation and vocoder decode interleave on this thread,
+    // so the vocoder must be resident before the talker starts.
     std::vector<int32_t> speech_codes;
+    int64_t t_decode_ms = 0;
+    int32_t emitted_frames = 0;
+    bool stream_failed = false;
+    frame_callback_t on_frame = nullptr;
+    std::function<bool(int32_t)> flush_pcm;
+    std::vector<float> chunk;
+
+    if (streaming) {
+        if (!ensure_decoder_loaded()) {
+            return result;
+        }
+        const int32_t chunk_frames = stream_chunk_frames();
+        const int32_t context_frames = stream_context_frames();
+        const int32_t sample_rate = audio_decoder_.get_config().sample_rate;
+
+        // Decode and emit every complete chunk below end_frame. Consecutive
+        // ranges through decode_range() reproduce decode_chunked() exactly, so
+        // the streamed samples are the chunked whole-utterance waveform.
+        flush_pcm = [&, chunk_frames, context_frames, sample_rate](int32_t end_frame) -> bool {
+            while (emitted_frames < end_frame) {
+                const int32_t stop = std::min(end_frame, emitted_frames + chunk_frames);
+                const int64_t t_chunk_start = get_time_ms();
+                if (!audio_decoder_.decode_range(speech_codes.data(), emitted_frames, stop,
+                                                 context_frames, chunk)) {
+                    result.error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
+                    stream_failed = true;
+                    return false;
+                }
+                t_decode_ms += get_time_ms() - t_chunk_start;
+                emitted_frames = stop;
+                result.audio.insert(result.audio.end(), chunk.begin(), chunk.end());
+                if (!pcm_callback_(chunk.data(), (int32_t) chunk.size(), sample_rate)) {
+                    result.error_msg = "Synthesis aborted by PCM callback";
+                    stream_failed = true;
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        on_frame = [&, chunk_frames](const int32_t *, int32_t) -> bool {
+            const int32_t n_now = (int32_t)(speech_codes.size() / (size_t) n_codebooks);
+            if (n_now - emitted_frames < chunk_frames) {
+                return true;
+            }
+            return flush_pcm(n_now);
+        };
+    }
+
     if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
                                speaker_embedding, params.max_audio_tokens, speech_codes,
                                params.language_id, params.repetition_penalty,
-                               params.temperature, params.top_k)) {
-        result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
+                               params.temperature, params.top_k, on_frame)) {
+        if (!stream_failed) {
+            result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
+        }
         return result;
     }
-    result.t_generate_ms = get_time_ms() - t_generate_start;
+    result.t_generate_ms = get_time_ms() - t_generate_start - t_decode_ms;
     sample_memory("synth/after-generate");
-    
-    int n_codebooks = transformer_.get_config().n_codebooks;
+
     int n_frames = (int)speech_codes.size() / n_codebooks;
-    
+
     if (params.print_progress) {
         fprintf(stderr, "Speech codes generated: %d frames x %d codebooks\n", n_frames, n_codebooks);
     }
@@ -502,31 +593,26 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         sample_memory("synth/after-transformer-unload");
     }
     
-    // Step 4: Decode speech codes to waveform using vocoder
-    int64_t t_decode_start = get_time_ms();
-    if (!decoder_loaded_) {
-        int64_t t_decoder_load_start = get_time_ms();
-        if (decoder_model_path_.empty()) {
-            result.error_msg = "Internal error: missing vocoder model path";
+    // Step 4: Decode speech codes to waveform using vocoder.
+    // Streaming already decoded everything up to emitted_frames while generating;
+    // only the trailing partial chunk is left.
+    if (streaming) {
+        if (!flush_pcm(n_frames)) {
             return result;
         }
-        if (!audio_decoder_.load_model(decoder_model_path_)) {
-            result.error_msg = "Failed to load vocoder: " + audio_decoder_.get_error();
+        result.t_decode_ms = t_decode_ms;
+    } else {
+        int64_t t_decode_start = get_time_ms();
+        if (!ensure_decoder_loaded()) {
             return result;
         }
-        decoder_loaded_ = true;
-        if (params.print_timing) {
-            fprintf(stderr, "  Vocoder lazy-loaded in %lld ms\n",
-                    (long long)(get_time_ms() - t_decoder_load_start));
-            sample_memory("synth/after-vocoder-load");
+
+        if (!audio_decoder_.decode(speech_codes.data(), n_frames, result.audio)) {
+            result.error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
+            return result;
         }
+        result.t_decode_ms = get_time_ms() - t_decode_start;
     }
-    
-    if (!audio_decoder_.decode(speech_codes.data(), n_frames, result.audio)) {
-        result.error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
-        return result;
-    }
-    result.t_decode_ms = get_time_ms() - t_decode_start;
     sample_memory("synth/after-decode");
 
     if (low_mem_mode_) {
@@ -572,6 +658,36 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
 
 void Qwen3TTS::set_progress_callback(tts_progress_callback_t callback) {
     progress_callback_ = callback;
+}
+
+void Qwen3TTS::set_pcm_callback(tts_pcm_callback_t callback,
+                                int32_t chunk_frames, int32_t context_frames) {
+    pcm_callback_ = std::move(callback);
+    pcm_chunk_frames_ = chunk_frames;
+    pcm_context_frames_ = context_frames;
+}
+
+int32_t Qwen3TTS::stream_chunk_frames() const {
+    if (pcm_chunk_frames_ > 0) {
+        return pcm_chunk_frames_;
+    }
+    // 12 codec frames ≈ 0.96 s of audio at 12.5 Hz: small enough to start
+    // playback early, large enough that the left-context re-decode stays cheap.
+    int32_t frames = 12;
+    if (const char * env = std::getenv("QWEN3_TTS_STREAM_CHUNK_FRAMES")) {
+        const int32_t parsed = std::atoi(env);
+        if (parsed > 0) {
+            frames = parsed;
+        }
+    }
+    return frames;
+}
+
+int32_t Qwen3TTS::stream_context_frames() const {
+    if (pcm_context_frames_ >= 0) {
+        return pcm_context_frames_;
+    }
+    return AudioTokenizerDecoder::default_context_frames();
 }
 
 // WAV file loading (16-bit PCM or 32-bit float)
