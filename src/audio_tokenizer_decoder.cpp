@@ -61,38 +61,53 @@ void AudioTokenizerDecoder::unload_model() {
     codes_buf_.clear();
 }
 
+// Divide each codebook entry by its usage count, in place, on the host.
+//
+// This used to cast tensor->data straight to a host pointer. That is only legal
+// when the weights live in a CPU buffer (or a unified-memory one, like Metal's).
+// The invariant was never stated and was held for AUTO only by the placement bug
+// this file's loader just lost: under QWEN3_TTS_BACKEND=cuda the decoder's
+// weights have always been in a cudaMalloc'd buffer, where tensor->data is a
+// device pointer and dereferencing it from the host is undefined.
+//
+// Stage through ggml_backend_tensor_get/set instead, so this is correct on every
+// backend and does not depend on where the placement policy put the weights.
 void AudioTokenizerDecoder::normalize_codebooks() {
     const float epsilon = 1e-5f;
-    
-    auto normalize_codebook = [epsilon](struct ggml_tensor * codebook, struct ggml_tensor * usage, const char *) {
-        if (!codebook || !usage || !codebook->data || !usage->data) return;
-        
-        int64_t codebook_dim = codebook->ne[0];
-        int64_t codebook_size = codebook->ne[1];
-        
-        ggml_fp16_t * cb_data = (ggml_fp16_t *)codebook->data;
-        float * usage_data = (float *)usage->data;
-        
+
+    std::vector<ggml_fp16_t> cb_host;
+    std::vector<float> usage_host;
+
+    auto normalize_codebook = [&](struct ggml_tensor * codebook, struct ggml_tensor * usage) {
+        if (!codebook || !usage || !codebook->buffer || !usage->buffer) return;
+
+        const int64_t codebook_dim  = codebook->ne[0];
+        const int64_t codebook_size = codebook->ne[1];
+
+        cb_host.resize(ggml_nbytes(codebook) / sizeof(ggml_fp16_t));
+        usage_host.resize(ggml_nbytes(usage) / sizeof(float));
+        ggml_backend_tensor_get(codebook, cb_host.data(), 0, ggml_nbytes(codebook));
+        ggml_backend_tensor_get(usage, usage_host.data(), 0, ggml_nbytes(usage));
+
         for (int64_t emb_idx = 0; emb_idx < codebook_size; ++emb_idx) {
-            float u = usage_data[emb_idx];
+            float u = usage_host[emb_idx];
             if (u < epsilon) u = epsilon;
-            float inv_u = 1.0f / u;
-            
+            const float inv_u = 1.0f / u;
+
             for (int64_t dim_idx = 0; dim_idx < codebook_dim; ++dim_idx) {
-                int64_t mem_idx = dim_idx + emb_idx * codebook_dim;
-                float val = ggml_fp16_to_fp32(cb_data[mem_idx]);
-                cb_data[mem_idx] = ggml_fp32_to_fp16(val * inv_u);
+                const int64_t mem_idx = dim_idx + emb_idx * codebook_dim;
+                const float val = ggml_fp16_to_fp32(cb_host[mem_idx]);
+                cb_host[mem_idx] = ggml_fp32_to_fp16(val * inv_u);
             }
         }
-        
+
+        ggml_backend_tensor_set(codebook, cb_host.data(), 0, ggml_nbytes(codebook));
     };
-    
-    normalize_codebook(model_.vq_first_codebook, model_.vq_first_usage, "first");
-    
+
+    normalize_codebook(model_.vq_first_codebook, model_.vq_first_usage);
+
     for (int i = 0; i < 15; ++i) {
-        char name[16];
-        snprintf(name, sizeof(name), "rest%d", i);
-        normalize_codebook(model_.vq_rest_codebook[i], model_.vq_rest_usage[i], name);
+        normalize_codebook(model_.vq_rest_codebook[i], model_.vq_rest_usage[i]);
     }
 }
 
@@ -340,8 +355,7 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
     }
     
     if (!load_tensor_data_from_file(model_path, gguf_ctx, model_.ctx,
-                                     model_.tensors, model_.buffer, error_msg_,
-                                     GGML_BACKEND_DEVICE_TYPE_IGPU)) {
+                                     model_.tensors, model_.buffer, error_msg_)) {
         return false;
     }
     
@@ -351,18 +365,13 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
         model_.dec_blocks[i].res[2].dilation = 9;
     }
     
+    // normalize_codebooks() now writes back through ggml_backend_tensor_set, so
+    // there is nothing left to sync. The old follow-up loop copied t->data onto
+    // itself, which was a no-op on a CPU buffer and a host-pointer-as-source
+    // upload on a device one.
     normalize_codebooks();
-    // Codebooks are normalized in host memory; sync once to backend tensors.
-    auto upload_if_present = [](struct ggml_tensor * t) {
-        if (t && t->data) {
-            ggml_backend_tensor_set(t, t->data, 0, ggml_nbytes(t));
-        }
-    };
-    upload_if_present(model_.vq_first_codebook);
-    for (int i = 0; i < 15; ++i) {
-        upload_if_present(model_.vq_rest_codebook[i]);
-    }
-    
+
+
     state_.backend = init_preferred_backend("AudioTokenizerDecoder", &error_msg_);
     if (!state_.backend) {
         return false;
