@@ -87,9 +87,10 @@ Important: `ggml_cast` to F32 is needed before `ggml_mul_mat` when weight tensor
 
 Backend initialization and scheduling notes:
 
-- Use `init_preferred_backend()` (`src/gguf_loader.cpp`) to select backend in order: `IGPU -> GPU -> ACCEL -> CPU`
+- `init_backend_by_placement_policy()` (`src/gguf_loader.cpp`) is the only place the engine decides where anything runs: `QWEN3_TTS_BACKEND=cpu|cuda`, else auto = `IGPU -> GPU -> ACCEL -> CPU`. Never re-derive it in a caller
+- Compute backends come from `init_preferred_backend()` (process-wide, ref-counted); weight buffers come from `load_tensor_data_from_file()`. Both call the policy, so a component's weights and its compute always land on the same device
 - If the selected runtime backend is not CPU, add a CPU backend as scheduler fallback (`backend_cpu`) when calling `ggml_backend_sched_new(...)`
-- Decoder follows the same backend preference; load decoder weights with `GGML_BACKEND_DEVICE_TYPE_IGPU` preference for Metal-first execution
+- Each component logs `Weight buffer: <name>` next to its `<Component> backend: <device>` line. If those two disagree the scheduler will silently run that component on the buffer's device — that is a bug, not a fallback
 
 ### Model Architecture
 

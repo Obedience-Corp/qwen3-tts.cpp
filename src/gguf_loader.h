@@ -62,18 +62,22 @@ protected:
     std::string file_path_;
 };
 
-// Helper function to allocate and load tensor data from GGUF file
+// Allocate and load tensor data from a GGUF file onto the backend chosen by
+// the engine's single placement policy — the same one init_preferred_backend()
+// uses for compute. There is deliberately no per-caller device override: a
+// component whose weights and compute disagree runs on the wrong device
+// silently.
 bool load_tensor_data_from_file(
     const std::string & path,
     struct gguf_context * ctx,
     struct ggml_context * model_ctx,
     const std::map<std::string, struct ggml_tensor *> & tensors,
     ggml_backend_buffer_t & buffer,
-    std::string & error_msg,
-    enum ggml_backend_dev_type preferred_backend_type = GGML_BACKEND_DEVICE_TYPE_CPU
+    std::string & error_msg
 );
 
-// Helper to initialize backend with GPU preference and CPU fallback
+// Process-wide compute backend, chosen by the same placement policy.
+// QWEN3_TTS_BACKEND=auto|cpu|cuda; auto tries IGPU -> GPU -> ACCEL -> CPU.
 ggml_backend_t init_preferred_backend(const char * component_name, std::string * error_msg);
 void release_preferred_backend(ggml_backend_t backend);
 

@@ -675,7 +675,9 @@ bool TTSTransformer::load_tensor_data(const std::string & path, struct gguf_cont
         release_preferred_backend(backend);
         return false;
     }
-    
+    fprintf(stderr, "  Weight buffer: %s\n", ggml_backend_buffer_name(model_.buffer));
+
+
     FILE * f = fopen(path.c_str(), "rb");
     if (!f) {
         error_msg_ = "Failed to open file for reading: " + path;

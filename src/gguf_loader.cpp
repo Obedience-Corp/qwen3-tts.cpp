@@ -123,25 +123,40 @@ ggml_backend_t init_cuda_backend_from_env() {
     return nullptr;
 }
 
-ggml_backend_t init_tensor_loader_backend(enum ggml_backend_dev_type preferred_backend_type) {
+// The one placement decision in the engine. Weights and compute must agree:
+// when they disagree the scheduler quietly runs the mismatched component on
+// whichever backend owns its buffer, which reads as a 3.6x slowdown, not as an
+// error. Every caller goes through here — do not re-derive this anywhere else.
+ggml_backend_t init_backend_by_placement_policy() {
     const backend_mode mode = get_backend_mode_from_env();
 
     if (mode == backend_mode::CPU) {
         return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     }
+
     if (mode == backend_mode::CUDA) {
         ggml_backend_t backend = init_cuda_backend_from_env();
         if (!backend) {
+            fprintf(stderr, "  [backend] CUDA requested but unavailable, falling back to CPU\n");
             backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         }
         return backend;
     }
 
-    ggml_backend_t backend = ggml_backend_init_by_type(preferred_backend_type, nullptr);
-    if (!backend && preferred_backend_type != GGML_BACKEND_DEVICE_TYPE_CPU) {
-        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    static const enum ggml_backend_dev_type auto_order[] = {
+        GGML_BACKEND_DEVICE_TYPE_IGPU,
+        GGML_BACKEND_DEVICE_TYPE_GPU,
+        GGML_BACKEND_DEVICE_TYPE_ACCEL,
+        GGML_BACKEND_DEVICE_TYPE_CPU,
+    };
+    for (size_t i = 0; i < sizeof(auto_order) / sizeof(auto_order[0]); ++i) {
+        ggml_backend_t backend = ggml_backend_init_by_type(auto_order[i], nullptr);
+        if (backend) {
+            return backend;
+        }
     }
-    return backend;
+
+    return nullptr;
 }
 }
 
@@ -160,28 +175,7 @@ ggml_backend_t init_preferred_backend(const char * component_name, std::string *
         return shared.backend;
     }
 
-    ggml_backend_t backend = nullptr;
-    const backend_mode mode = get_backend_mode_from_env();
-    if (mode == backend_mode::CPU) {
-        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-    } else if (mode == backend_mode::CUDA) {
-        backend = init_cuda_backend_from_env();
-        if (!backend) {
-            fprintf(stderr, "  [backend] CUDA requested but unavailable, falling back to CPU\n");
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-        }
-    } else {
-        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
-        if (!backend) {
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
-        }
-        if (!backend) {
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_ACCEL, nullptr);
-        }
-        if (!backend) {
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-        }
-    }
+    ggml_backend_t backend = init_backend_by_placement_policy();
 
     if (!backend && error_msg) {
         const char * name = component_name ? component_name : "component";
@@ -297,15 +291,14 @@ bool load_tensor_data_from_file(
     struct ggml_context * model_ctx,
     const std::map<std::string, struct ggml_tensor *> & tensors,
     ggml_backend_buffer_t & buffer,
-    std::string & error_msg,
-    enum ggml_backend_dev_type preferred_backend_type
+    std::string & error_msg
 ) {
-    ggml_backend_t backend = init_tensor_loader_backend(preferred_backend_type);
+    ggml_backend_t backend = init_backend_by_placement_policy();
     if (!backend) {
         error_msg = "Failed to initialize backend for GGUF tensor loader";
         return false;
     }
-    
+
     // Allocate buffer for all tensors
     buffer = ggml_backend_alloc_ctx_tensors(model_ctx, backend);
     if (!buffer) {
@@ -313,7 +306,8 @@ bool load_tensor_data_from_file(
         ggml_backend_free(backend);
         return false;
     }
-    
+    fprintf(stderr, "  Weight buffer: %s\n", ggml_backend_buffer_name(buffer));
+
     // Open file for reading tensor data
     FILE * f = fopen(path.c_str(), "rb");
     if (!f) {
