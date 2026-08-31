@@ -34,9 +34,10 @@ endif()
 # Find threads
 find_package(Threads REQUIRED)
 
-# GGML library paths
+# GGML library paths. Override when ggml was built out of tree, e.g.
+#   cmake -S . -B build -DGGML_BUILD_DIR=/path/to/ggml/build-vulkan
 set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml")
-set(GGML_BUILD_DIR "${GGML_DIR}/build")
+set(GGML_BUILD_DIR "${GGML_DIR}/build" CACHE PATH "ggml cmake build tree")
 
 # Detect Metal backend availability
 if(APPLE AND EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib")
@@ -44,6 +45,17 @@ if(APPLE AND EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib")
     message(STATUS "GGML Metal backend found — GPU acceleration enabled")
 else()
     set(GGML_HAS_METAL OFF)
+endif()
+
+# Detect Vulkan backend the same way Metal is detected: the ggml tree must
+# already have been built with -DGGML_VULKAN=ON. Linking ggml-vulkan is what
+# registers the IGPU device; AUTO will stay on CPU if this .so is missing.
+if(EXISTS "${GGML_BUILD_DIR}/src/ggml-vulkan/libggml-vulkan.so" OR
+   EXISTS "${GGML_BUILD_DIR}/src/ggml-vulkan/libggml-vulkan.dylib")
+    set(GGML_HAS_VULKAN ON)
+    message(STATUS "GGML Vulkan backend found — GPU acceleration enabled")
+else()
+    set(GGML_HAS_VULKAN OFF)
 endif()
 
 # Text tokenizer library
@@ -58,6 +70,7 @@ target_include_directories(text_tokenizer PUBLIC
 target_link_directories(text_tokenizer PUBLIC
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_BUILD_DIR}/src/ggml-vulkan
 )
 target_link_libraries(text_tokenizer PUBLIC
     ggml
@@ -67,6 +80,9 @@ target_link_libraries(text_tokenizer PUBLIC
 )
 if(GGML_HAS_METAL)
     target_link_libraries(text_tokenizer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
+if(GGML_HAS_VULKAN)
+    target_link_libraries(text_tokenizer PUBLIC ggml-vulkan)
 endif()
 
 # TTS Transformer library (GGML-based + optional CoreML bridge)
@@ -91,6 +107,7 @@ target_include_directories(tts_transformer PUBLIC
 target_link_directories(tts_transformer PUBLIC
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_BUILD_DIR}/src/ggml-vulkan
 )
 target_link_libraries(tts_transformer PUBLIC
     ggml
@@ -100,6 +117,9 @@ target_link_libraries(tts_transformer PUBLIC
 )
 if(GGML_HAS_METAL)
     target_link_libraries(tts_transformer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
+if(GGML_HAS_VULKAN)
+    target_link_libraries(tts_transformer PUBLIC ggml-vulkan)
 endif()
 if(APPLE AND QWEN3_TTS_COREML)
     target_link_libraries(tts_transformer PUBLIC
@@ -120,6 +140,7 @@ target_include_directories(audio_tokenizer_encoder PUBLIC
 target_link_directories(audio_tokenizer_encoder PUBLIC
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_BUILD_DIR}/src/ggml-vulkan
 )
 target_link_libraries(audio_tokenizer_encoder PUBLIC
     ggml
@@ -129,6 +150,9 @@ target_link_libraries(audio_tokenizer_encoder PUBLIC
 )
 if(GGML_HAS_METAL)
     target_link_libraries(audio_tokenizer_encoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
+if(GGML_HAS_VULKAN)
+    target_link_libraries(audio_tokenizer_encoder PUBLIC ggml-vulkan)
 endif()
 
 # Audio tokenizer decoder library (GGML-based)
@@ -143,6 +167,7 @@ target_include_directories(audio_tokenizer_decoder PUBLIC
 target_link_directories(audio_tokenizer_decoder PUBLIC
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_BUILD_DIR}/src/ggml-vulkan
 )
 target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml
@@ -152,6 +177,9 @@ target_link_libraries(audio_tokenizer_decoder PUBLIC
 )
 if(GGML_HAS_METAL)
     target_link_libraries(audio_tokenizer_decoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
+if(GGML_HAS_VULKAN)
+    target_link_libraries(audio_tokenizer_decoder PUBLIC ggml-vulkan)
 endif()
 
 # Qwen3 TTS library (full pipeline)

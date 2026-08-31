@@ -77,7 +77,8 @@ bool load_tensor_data_from_file(
 );
 
 // Process-wide compute backend, chosen by the same placement policy.
-// QWEN3_TTS_BACKEND=auto|cpu|cuda; auto tries IGPU -> GPU -> ACCEL -> CPU.
+// QWEN3_TTS_BACKEND=auto|cpu|cuda|vulkan; auto tries IGPU -> GPU -> ACCEL -> CPU.
+// vulkan fails closed if no IGPU/GPU device is registered.
 ggml_backend_t init_preferred_backend(const char * component_name, std::string * error_msg);
 void release_preferred_backend(ggml_backend_t backend);
 

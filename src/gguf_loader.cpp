@@ -25,6 +25,7 @@ enum class backend_mode {
     AUTO,
     CPU,
     CUDA,
+    VULKAN,
 };
 
 bool iequals(const char * a, const char * b) {
@@ -67,6 +68,9 @@ backend_mode get_backend_mode_from_env() {
     }
     if (iequals(env, "cuda")) {
         return backend_mode::CUDA;
+    }
+    if (iequals(env, "vulkan")) {
+        return backend_mode::VULKAN;
     }
 
     fprintf(stderr, "  [backend] Unknown QWEN3_TTS_BACKEND=%s, using auto\n", env);
@@ -143,6 +147,19 @@ ggml_backend_t init_backend_by_placement_policy() {
         return backend;
     }
 
+    if (mode == backend_mode::VULKAN) {
+        // Fail closed: a missing RADV/MoltenVK ICD must not look like a CPU
+        // success. AUTO still walks IGPU -> GPU -> ACCEL -> CPU.
+        ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+        if (!backend) {
+            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+        }
+        if (!backend) {
+            fprintf(stderr, "  [backend] Vulkan requested but no IGPU/GPU device registered\n");
+        }
+        return backend;
+    }
+
     static const enum ggml_backend_dev_type auto_order[] = {
         GGML_BACKEND_DEVICE_TYPE_IGPU,
         GGML_BACKEND_DEVICE_TYPE_GPU,
@@ -180,7 +197,7 @@ ggml_backend_t init_preferred_backend(const char * component_name, std::string *
     if (!backend && error_msg) {
         const char * name = component_name ? component_name : "component";
         *error_msg = "Failed to initialize backend for " + std::string(name)
-            + " (QWEN3_TTS_BACKEND=auto|cpu|cuda)";
+            + " (QWEN3_TTS_BACKEND=auto|cpu|cuda|vulkan)";
     }
 
     if (backend) {

@@ -25,7 +25,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -h, --help             Show this help\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Environment:\n");
-    fprintf(stderr, "  QWEN3_TTS_BACKEND      Runtime backend override: auto|cuda|cpu\n");
+    fprintf(stderr, "  QWEN3_TTS_BACKEND      Runtime backend override: auto|cuda|cpu|vulkan\n");
     fprintf(stderr, "  QWEN3_TTS_DEVICE       CUDA device index when backend=cuda (default: 0)\n");
     fprintf(stderr, "  QWEN3_TTS_DECODER_GPU_MAX_FRAMES     Max frames per CUDA vocoder chunk (default: 34)\n");
     fprintf(stderr, "  QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES Left context per CUDA vocoder chunk (default: 12)\n");
