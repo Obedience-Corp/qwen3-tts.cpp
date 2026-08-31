@@ -78,9 +78,12 @@ bool load_tensor_data_from_file(
 
 // Process-wide compute backend, chosen by the same placement policy.
 // QWEN3_TTS_BACKEND=auto|cpu|cuda|vulkan; auto tries IGPU -> GPU -> ACCEL -> CPU.
-// vulkan fails closed if no IGPU/GPU device is registered.
+// vulkan fails closed unless a device whose ggml registry name is "Vulkan" exists.
 ggml_backend_t init_preferred_backend(const char * component_name, std::string * error_msg);
 void release_preferred_backend(ggml_backend_t backend);
+
+// First device whose ggml_backend_reg_name matches, or nullptr. No CPU fallback.
+ggml_backend_t init_backend_by_registry_name(const char * registry_name);
 
 // Helper function to free model resources
 void free_ggml_resources(struct ggml_context * ctx, ggml_backend_buffer_t buffer);

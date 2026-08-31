@@ -261,6 +261,14 @@ target_link_libraries(test_decoder PRIVATE
     Threads::Threads
 )
 
+add_executable(test_backend_registry
+    tests/test_backend_registry.cpp
+)
+target_link_libraries(test_backend_registry PRIVATE
+    text_tokenizer
+    Threads::Threads
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -295,5 +303,9 @@ add_test(NAME transformer_test
 )
 add_test(NAME decoder_test
     COMMAND test_decoder
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME backend_registry_test
+    COMMAND test_backend_registry
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )

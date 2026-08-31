@@ -127,6 +127,33 @@ ggml_backend_t init_cuda_backend_from_env() {
     return nullptr;
 }
 
+}
+
+ggml_backend_t init_backend_by_registry_name(const char * registry_name) {
+    if (!registry_name || registry_name[0] == '\0') {
+        return nullptr;
+    }
+
+    const size_t n_devs = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_devs; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
+        if (!reg_name || !iequals(reg_name, registry_name)) {
+            continue;
+        }
+
+        ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+        if (backend) {
+            return backend;
+        }
+    }
+
+    return nullptr;
+}
+
+namespace {
+
 // The one placement decision in the engine. Weights and compute must agree:
 // when they disagree the scheduler quietly runs the mismatched component on
 // whichever backend owns its buffer, which reads as a 3.6x slowdown, not as an
@@ -148,14 +175,11 @@ ggml_backend_t init_backend_by_placement_policy() {
     }
 
     if (mode == backend_mode::VULKAN) {
-        // Fail closed: a missing RADV/MoltenVK ICD must not look like a CPU
-        // success. AUTO still walks IGPU -> GPU -> ACCEL -> CPU.
-        ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+        // Fail closed on the Vulkan registry, not on "first IGPU/GPU". A mixed
+        // CUDA+Vulkan build's discrete card is also GPU and would otherwise win.
+        ggml_backend_t backend = init_backend_by_registry_name("Vulkan");
         if (!backend) {
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
-        }
-        if (!backend) {
-            fprintf(stderr, "  [backend] Vulkan requested but no IGPU/GPU device registered\n");
+            fprintf(stderr, "  [backend] Vulkan requested but no Vulkan device registered\n");
         }
         return backend;
     }
